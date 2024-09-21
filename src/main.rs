@@ -1,30 +1,10 @@
-use std::fmt::Display;
+use serde_json::Value;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::thread;
-
-enum HttpMethod {
-    Get,
-    Post,
-    Patch,
-    Put,
-    Delete,
-}
-
-impl TryFrom<&str> for HttpMethod {
-    type Error = &'static str;
-    fn try_from(value: &str) -> Result<Self, Self::Error> {
-        match value {
-            "GET" => Ok(HttpMethod::Get),
-            "POST" => Ok(HttpMethod::Post),
-            "PATCH" => Ok(HttpMethod::Patch),
-            "PUT" => Ok(HttpMethod::Put),
-            "DELETE" => Ok(HttpMethod::Delete),
-            _ => Err("HTTP Method not found"),
-        }
-    }
-}
-
+mod body;
+mod method;
+use method::HttpMethod;
 fn handle_client(mut stream: TcpStream) {
     let mut buf = [0; 1024];
     stream.read(&mut buf).expect("Unluck in reading");
@@ -35,13 +15,12 @@ fn handle_client(mut stream: TcpStream) {
     let method: Result<HttpMethod, &str> = HttpMethod::try_from(entries[0]);
 
     match method {
-        Ok(m) => println!("Got method"),
+        Ok(m) => println!("Got method, {:?}", m),
         Err(e) => eprintln!("Error: {}", e),
     }
+    let body = body::parse_body(entries[entries.len() - 1]).unwrap_or_default();
+    println!("{}", body);
 
-    for entr in entries {
-        println!("{}", entr);
-    }
     let res = "Fuck you".as_bytes();
     stream.write(res).expect("Balls");
 }
