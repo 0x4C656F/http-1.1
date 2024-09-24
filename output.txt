@@ -1,0 +1,269 @@
+o/ File ./src/main.rs
+use std::net::TcpListener;
+use std::thread;
+mod body;
+mod content_type;
+mod method;
+mod request;
+mod response;
+
+pub const HTTP_VERSION: &str = "HTTP/1.1";
+
+fn main() {
+    let socket = TcpListener::bind("127.0.0.1:8080").expect("Shit");
+    for stream in socket.incoming() {
+        match stream {
+            Ok(s) => {
+                thread::spawn(move || {
+                    let req = request::handle_request(s);
+                    dbg!(req);
+                    //let res = response::handle_response(&mut s);
+                    //dbg!(res);
+                });
+            }
+            Err(e) => eprintln!("Error: {}", e),
+        }
+    }
+}
+// File ./src/body.rs
+use serde_json::{Result, Value};
+
+pub fn parse_body(body_string: &str) -> Result<Value> {
+    let trimmed_body = body_string.trim_end_matches('\0');
+
+    serde_json::from_str(trimmed_body)
+}
+// File ./src/request.rs
+use crate::body::parse_body;
+use crate::method::{HttpMethod, RequestLine};
+use std::io::Read;
+use std::net::TcpStream;
+
+use serde_json::Value;
+
+#[derive(Debug)]
+pub struct Request {
+    headers: Vec<Header>,
+    raw_body: Option<String>,
+    method: HttpMethod,
+    http_version: String,
+    path: String,
+}
+
+impl Request {
+    pub fn body(&self) -> Option<Value> {
+        if let Some(raw) = &self.raw_body {
+            let body = parse_body(raw.as_str()).ok();
+            body
+        } else {
+            None
+        }
+    }
+}
+#[derive(Debug)]
+pub struct Header(String, String);
+
+impl Header {
+    pub fn from_header_str(s: &str) -> Option<Header> {
+        let pair: Vec<&str> = s.split(':').map(|str| str.trim()).collect();
+        if pair.len() != 2 {
+            return None;
+        }
+        Some(Header(pair[0].to_owned(), pair[1].to_owned()))
+    }
+}
+
+pub fn handle_request(mut stream: TcpStream) -> Request {
+    let mut buf = [0; 1024];
+    stream.read(&mut buf).expect("Error reading from stream");
+
+    let req = String::from_utf8_lossy(&buf).into_owned();
+    let entries: Vec<&str> = req.split('\n').collect();
+
+    let req_line = RequestLine::try_from(entries[0]).expect("Invalid request line");
+
+    let headers: Vec<Header> = entries
+        .iter()
+        .filter_map(|e| Header::from_header_str(e))
+        .collect();
+
+    let raw_body = entries.last().map(|val| val.to_string());
+
+    Request {
+        raw_body,
+        headers,
+        http_version: req_line.http_version.to_string(),
+        method: req_line.method,
+        path: req_line.path.to_string(),
+    }
+}
+// File ./src/method.rs
+#[derive(Debug)]
+pub enum HttpMethod {
+    Get,
+    Post,
+    Patch,
+    Put,
+    Delete,
+}
+
+pub struct RequestLine<'a> {
+    pub method: HttpMethod,
+    pub path: &'a str,
+    pub http_version: &'a str,
+}
+
+impl<'a> TryFrom<&'a str> for RequestLine<'a> {
+    type Error = &'static str;
+    fn try_from(v: &'a str) -> Result<Self, Self::Error> {
+        let header_split: Vec<&str> = v.split('/').map(|val| val.trim()).collect();
+
+        let method = match header_split[0] {
+            "GET" => Ok(HttpMethod::Get),
+            "POST" => Ok(HttpMethod::Post),
+            "PATCH" => Ok(HttpMethod::Patch),
+            "PUT" => Ok(HttpMethod::Put),
+            "DELETE" => Ok(HttpMethod::Delete),
+            _ => Err("HTTP Method not found"),
+        }?;
+        Ok(RequestLine {
+            method,
+            path: header_split[1],
+            http_version: header_split[2],
+        })
+    }
+}
+// File ./src/response.rs
+use std::{io::Write, net::TcpStream};
+
+use crate::{
+    method::HttpMethod,
+    request::{Header, Request},
+    HTTP_VERSION,
+};
+
+pub fn handle_response(s: &mut TcpStream) -> Response {
+    let mut res = Response::new();
+    res.add_response_line(ResponseLine::default());
+    let _ = s.write(res.response_string.as_bytes());
+    res
+}
+
+#[derive(Debug)]
+pub struct Response {
+    response_string: String,
+}
+
+pub struct ResponseLine {
+    http_version: String,
+    status_code: u32,
+    status: String,
+}
+impl ToString for ResponseLine {
+    fn to_string(&self) -> String {
+        format!("{} {} {}", self.http_version, self.status_code, self.status)
+    }
+}
+impl Default for ResponseLine {
+    fn default() -> Self {
+        Self {
+            status_code: 200,
+            status: "OK".into(),
+            http_version: HTTP_VERSION.into(),
+        }
+    }
+}
+
+impl Response {
+    fn add_header(&mut self, h: Header) {}
+    fn add_body(&mut self, body: String) {}
+    fn add_response_line(&mut self, line: ResponseLine) -> &mut Self {
+        self.response_string.push_str(&line.to_string());
+        self
+    }
+    fn new() -> Response {
+        Response {
+            response_string: String::new(),
+        }
+    }
+}
+// File ./src/content_type.rs
+use std::fmt;
+use std::str::FromStr;
+
+#[derive(Debug, PartialEq)]
+enum ContentType {
+    TextPlain,
+    TextHtml,
+    TextCss,
+    ApplicationJson,
+    ApplicationJavascript,
+    ApplicationXml,
+    ApplicationOctetStream,
+    MultipartFormData,
+    ApplicationFormUrlEncoded,
+    ImagePng,
+    ImageJpeg,
+    ImageGif,
+    AudioMpeg,
+    AudioOgg,
+    VideoMp4,
+    VideoWebm,
+    Unknown,
+}
+
+impl ContentType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ContentType::TextPlain => "text/plain",
+            ContentType::TextHtml => "text/html",
+            ContentType::TextCss => "text/css",
+            ContentType::ApplicationJson => "application/json",
+            ContentType::ApplicationJavascript => "application/javascript",
+            ContentType::ApplicationXml => "application/xml",
+            ContentType::ApplicationOctetStream => "application/octet-stream",
+            ContentType::MultipartFormData => "multipart/form-data",
+            ContentType::ApplicationFormUrlEncoded => "application/x-www-form-urlencoded",
+            ContentType::ImagePng => "image/png",
+            ContentType::ImageJpeg => "image/jpeg",
+            ContentType::ImageGif => "image/gif",
+            ContentType::AudioMpeg => "audio/mpeg",
+            ContentType::AudioOgg => "audio/ogg",
+            ContentType::VideoMp4 => "video/mp4",
+            ContentType::VideoWebm => "video/webm",
+            ContentType::Unknown => "unknown",
+        }
+    }
+}
+
+impl FromStr for ContentType {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "text/plain" => Ok(ContentType::TextPlain),
+            "text/html" => Ok(ContentType::TextHtml),
+            "text/css" => Ok(ContentType::TextCss),
+            "application/json" => Ok(ContentType::ApplicationJson),
+            "application/javascript" => Ok(ContentType::ApplicationJavascript),
+            "application/xml" => Ok(ContentType::ApplicationXml),
+            "application/octet-stream" => Ok(ContentType::ApplicationOctetStream),
+            "multipart/form-data" => Ok(ContentType::MultipartFormData),
+            "application/x-www-form-urlencoded" => Ok(ContentType::ApplicationFormUrlEncoded),
+            "image/png" => Ok(ContentType::ImagePng),
+            "image/jpeg" => Ok(ContentType::ImageJpeg),
+            "image/gif" => Ok(ContentType::ImageGif),
+            "audio/mpeg" => Ok(ContentType::AudioMpeg),
+            "audio/ogg" => Ok(ContentType::AudioOgg),
+            "video/mp4" => Ok(ContentType::VideoMp4),
+            "video/webm" => Ok(ContentType::VideoWebm),
+            _ => Ok(ContentType::Unknown),
+        }
+    }
+}
+
+impl fmt::Display for ContentType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
